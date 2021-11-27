@@ -1,17 +1,17 @@
 from contextlib import ExitStack
 from functools import lru_cache, partial
 import logging
+import re
 import socket
 import ssl
+import subprocess
 from subprocess import Popen, PIPE
 from tempfile import NamedTemporaryFile
 from urllib.request import urlopen, Request
 from urllib.parse import urlsplit
 
-from cryptography.x509 import load_der_x509_certificate
 
-
-__version__ = "0.1.0"
+__version__ = "0.2.0.dev"
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,31 @@ class CachedMethod:
         return result
 
 
+def openssl_get_cert_info(cert_der):
+    """
+    Get issuer, subject and AIA CA issuers (``aia_ca_issuers``)
+    from a DER certificate, using OpenSSL.
+    """
+    command_line = [
+        "openssl", "x509", "-inform", "DER", "-noout",
+        "-issuer", "-subject", "-ext", "authorityInfoAccess",
+        "-nameopt", "utf8,sep_comma_plus",
+    ]
+    proc = subprocess.run(command_line, input=cert_der, capture_output=True)
+    output_pairs = re.findall(
+        r"^(issuer=|subject=|\s+CA\s*Issuers.*URI:)(.*)$",
+        proc.stdout.decode("utf-8"),
+        re.MULTILINE | re.IGNORECASE,
+    )
+    result = {"aia_ca_issuers": []}
+    for k, v in output_pairs:
+        if k.startswith(" "):
+            result["aia_ca_issuers"].append(v.strip())
+        else:
+            result[k.lower()[:-1]] = v.strip()
+    return result
+
+
 class AIASession:
 
     def __init__(self, user_agent=DEFAULT_USER_AGENT):
@@ -78,7 +103,7 @@ class AIASession:
         # Trusted certificates whitelist in dict format like:
         # {"RFC4514 string": b"DER certificate contents"}
         self._trusted = {
-            load_der_x509_certificate(ca_der).subject.rfc4514_string(): ca_der
+            openssl_get_cert_info(ca_der)["subject"]: ca_der
             for ca_der in self._context.get_ca_certs(True)
         }
 
@@ -124,30 +149,24 @@ class AIASession:
         # Traverse the AIA path until it gets a self-signed certificate
         # or a certificate without a "parent" issuer URI reference
         while True:
-            cert = load_der_x509_certificate(der_cert)
-            subject_rfc4514 = cert.subject.rfc4514_string()
-            issuer_rfc4514 = cert.issuer.rfc4514_string()
-            if subject_rfc4514 == issuer_rfc4514:  # Self-signed (root) cert
-                if issuer_rfc4514 not in self._trusted:
+            cert_dict = openssl_get_cert_info(der_cert)
+            cert_issuer = cert_dict["issuer"]
+            if cert_dict["subject"] == cert_issuer:  # Self-signed (root) cert
+                if cert_issuer not in self._trusted:
                     raise InvalidCAError("Root in AIA but not in trusted list")
                 logger.debug(f"Found a self-signed (root) certificate for "
                              f"{host} in AIA, and it's also in trusted list!")
-                yield self._trusted[issuer_rfc4514]
+                yield self._trusted[cert_issuer]
                 return
             yield der_cert
-            exts = [wrapped_ext.value for wrapped_ext in cert.extensions]
-            exts_dict = {type(ext).__name__: ext for ext in exts}
-            aia = exts_dict.get("AuthorityInformationAccess", [])
-            aia_dict = {ad.access_method._name: ad.access_location.value
-                        for ad in aia}
-            if "caIssuers" not in aia_dict:
-                if issuer_rfc4514 not in self._trusted:
+            if not cert_dict["aia_ca_issuers"]:
+                if cert_issuer not in self._trusted:
                     raise InvalidCAError("Root not in trusted database")
                 logger.debug(f"Found the {host} certificate root!")
-                yield self._trusted[issuer_rfc4514]
+                yield self._trusted[cert_issuer]
                 return
             logger.debug(f"Found another {host} certificate chain entry (AIA)")
-            der_cert = self._get_ca_issuer_cert(aia_dict["caIssuers"])
+            der_cert = self._get_ca_issuer_cert(cert_dict["aia_ca_issuers"][0])
 
     def validate_certificate_chain(self, der_certs):
         """
