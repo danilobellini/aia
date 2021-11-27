@@ -10,7 +10,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import urlsplit
 
 
-__version__ = "0.2.0.dev"
+__version__ = "0.2.0"
 
 logger = logging.getLogger(__name__)
 
