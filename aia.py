@@ -5,7 +5,6 @@ import re
 import socket
 import ssl
 import subprocess
-from subprocess import Popen, PIPE
 from tempfile import NamedTemporaryFile
 from urllib.request import urlopen, Request
 from urllib.parse import urlsplit
@@ -198,13 +197,12 @@ class AIASession:
                 "-untrusted", intermediary_pem.name,
                 target_pem.name,
             ]
-            openssl_proc = Popen(command_line, stdout=PIPE, stderr=PIPE)
-            openssl_proc.wait()
+            openssl_proc = subprocess.run(command_line, capture_output=True)
 
             # Logs the OpenSSL results
             logger.debug("OpenSSL certificate chain validation results:")
             for stream_name in ["stdout", "stderr"]:
-                msg = getattr(openssl_proc, stream_name).read()
+                msg = getattr(openssl_proc, stream_name)
                 if msg.strip():
                     for line in msg.decode("ascii").splitlines():
                         logger.debug(f"[{stream_name}] {line}")
