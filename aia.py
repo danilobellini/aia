@@ -109,11 +109,14 @@ class AIASession:
     @CachedMethod
     def get_host_cert(self, host):
         """
-        Get the DER (binary) certificate for the taget host
+        Get the DER (binary) certificate for the target host
         without checking it (leaf certificate).
         """
         logger.debug(f"Downloading {host} certificate (TLS)")
-        with socket.create_connection((host, 443)) as sock:
+        port = 443
+        if ':' in host:
+            host, port = host.split(':')
+        with socket.create_connection((host, port)) as sock:
             with self._context.wrap_socket(sock, server_hostname=host) as ss:
                 return ss.getpeercert(True)
 
